@@ -138,40 +138,6 @@ attributes. None of them are required to run the model.
 
 ---
 
-## Defects fixed in the published blueprint
-
-These are not stub plumbing. They would follow you onto a real ServiceNow instance.
-
-**1 · Variable collision.** `crResultSysId` was written by three separate tasks — Flow
-Starter (`executionId`), Create Change Request (`sys_id`), Create Catalog Task (`sys_id`).
-It only worked because each catch event immediately followed its producer. Any
-reordering, parallelisation or retry breaks correlation silently. Split into
-`flowExecutionId`, `crSysId`, `catalogTaskSysId`.
-
-**2 · Duplicate message name.** Both intermediate catch events subscribed to
-`ServiceNowUserTask` with the same correlation-key expression. Split into
-`changeRequestDone` (keyed on `crSysId`) and `catalogTaskDone` (keyed on `catalogTaskSysId`).
-
-**3 · Retry storm.** `retryBackoff` was `PT0S` on all seven connector tasks with
-`retries="3"` — three immediate retries against ServiceNow on any transient 5xx. Now `PT5S`.
-
-**4 · Dead error branch.** `Simulate error` targeted `http://localhost:4711`, which from
-inside the connectors container is a connection refusal, not an HTTP response — while the
-task's `errorExpression` only raises a BPMN error on **407**. The incident branch could
-never fire. Now targets a stub endpoint returning a real 407.
-
-> The 407 is itself a clue: *Proxy Authentication Required* means the sample was authored
-> behind a corporate proxy. On a corporate network you may see genuine 407s from the
-> connector runtime against a real instance, indistinguishable from the simulated one.
-
-**5 · Housekeeping.** Orphan message `Message_2dq0qkn` (correlation key `=""`) removed;
-redundant `resultVariable` headers dropped where a `resultExpression` already existed;
-execution platform bumped to 8.8.
-
-![Message correlation on distinct keys](Images/CRP3.png)
-
----
-
 ## What the stub implements
 
 `app.py` plays the ServiceNow pool. Note that the ServiceNow lane in the diagram — the
@@ -196,6 +162,8 @@ Inbound calls are Basic-authenticated against `SN_USER` / `SN_PWD`, so the
 `{{secrets.snUser}}` / `{{secrets.snPwd}}` path in the model is genuinely exercised.
 Outbound callbacks authenticate to Camunda with OIDC client credentials.
 
+![Message correlation on distinct keys](Images/CRP3.png)
+
 **A correlation fix worth carrying forward.** The Spoke's *Correlate message* action maps
 to the correlate-message endpoint, which is explicitly **not buffered**. The blueprint
 puts `Start ServiceNow Flow` immediately before a catch on `fromSN`, so a fast callback
@@ -207,7 +175,7 @@ into any real ServiceNow flow you build.
 
 ## Cutting over to a real instance
 
-The transform introduced one indirection to make the switch a single field:
+The model carries one indirection so the switch is a single field:
 
 ```
 snInstance = "stub"
