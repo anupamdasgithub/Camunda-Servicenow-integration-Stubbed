@@ -84,36 +84,15 @@ This is precisely the *"may require minor adjustments to the Camunda Spoke"* cav
 Camunda's [prerequisites page](https://docs.camunda.io/docs/components/camunda-integrations/servicenow/prerequisites/).
 It is unsupported territory.
 
-### What the stub skips
-
-All four gates. The stub replaces the ServiceNow-side implementation, not the
-integration pattern:
-
-| Blueprint capability | Certified path | This repo | Fidelity |
-|---|---|---|---|
-| CRUD on ServiceNow tables | Outbound Connector → Table API | identical, unchanged | **100%** |
-| Incident on process error | Incident Handler | identical | **100%** |
-| Start Camunda from ServiceNow | Spoke *Start process* | REST → `/v2/process-instances` | ~95% |
-| Correlate back into Camunda | Spoke *Correlate message* | REST → message publication | ~95%, **plus a race fix** |
-| Signal / Cancel | Spoke actions | REST | 100% functional |
-| Start ServiceNow Flow | Flow Starter (Enterprise Pack) | stub endpoint at same path | ~70% — real loss |
-
-The only genuine capability loss is the Enterprise Pack's async Flow Trigger semantics.
-Everything else is packaging, vendor support, and a shorter security-review conversation.
-
-**A correlation fix worth carrying forward.** The Spoke's *Correlate message* action maps
-to the correlate-message endpoint, which is explicitly **not buffered**. The blueprint
-puts `Start ServiceNow Flow` immediately before a catch on `fromSN`, so a fast callback
-can arrive before the token does and be dropped silently. This stub uses the **buffered
-publication** endpoint with a TTL instead. That is a fix, not a workaround — carry it
-into any real ServiceNow flow you build.
+![Blueprint running against the stub](Images/CRP%202.png)
 
 ---
 
 ## Connectors
 
 All three ServiceNow connectors and the generic REST connector compile to the **same
-job type**. Verified from Camunda's own element-template JSON:
+job type**. Verified from Camunda's own element-template JSON, included in
+`Connectores/`:
 
 | Template | ID | Job type |
 |---|---|---|
@@ -149,8 +128,13 @@ outright.
 with the two dangling `elementTemplateId` / `elementTemplateVersion` task headers. Every
 `taskDefinition`, input mapping, secret reference and result expression is untouched.
 The tasks render as plain service tasks and behave identically — the model deployed and
-ran green for hours with the templates unresolved, which is the clearest possible
-demonstration that they are editor metadata.
+ran green with the templates unresolved, which is the clearest possible demonstration
+that they are editor metadata.
+
+`Connectores/` holds the four templates as downloaded from the Marketplace, unmodified.
+They are here as evidence for the table above: each file's `id`, `version` and `engines`
+fields are what a reader can check against the blueprint's `zeebe:modelerTemplateVersion`
+attributes. None of them are required to run the model.
 
 ---
 
@@ -178,18 +162,20 @@ never fire. Now targets a stub endpoint returning a real 407.
 
 > The 407 is itself a clue: *Proxy Authentication Required* means the sample was authored
 > behind a corporate proxy. On a corporate network you may see genuine 407s from the
-> connector runtime in Phase 2, indistinguishable from the simulated one.
+> connector runtime against a real instance, indistinguishable from the simulated one.
 
 **5 · Housekeeping.** Orphan message `Message_2dq0qkn` (correlation key `=""`) removed;
 redundant `resultVariable` headers dropped where a `resultExpression` already existed;
 execution platform bumped to 8.8.
 
+![Message correlation on distinct keys](Images/CRP3.png)
+
 ---
 
 ## What the stub implements
 
-`app.py` plays the ServiceNow pool. Note that `Process_snstub_v4_sn` — the green lane in
-the diagram — is `isExecutable="false"`. Its tasks, events and data stores have zero
+`app.py` plays the ServiceNow pool. Note that the ServiceNow lane in the diagram — the
+green band — is `isExecutable="false"`. Its tasks, events and data stores have zero
 runtime behaviour; they are documentation. On a real instance those boxes are Flow
 Designer work you still have to build. Here, the stub is that implementation.
 
@@ -210,117 +196,16 @@ Inbound calls are Basic-authenticated against `SN_USER` / `SN_PWD`, so the
 `{{secrets.snUser}}` / `{{secrets.snPwd}}` path in the model is genuinely exercised.
 Outbound callbacks authenticate to Camunda with OIDC client credentials.
 
----
-
-## Run
-
-```bash
-pip install fastapi uvicorn httpx
-```
-
-```bash
-export SN_USER=snuser
-export SN_PWD=snpwd
-export CAMUNDA_REST_BASE=http://localhost:8088/v2
-export OIDC_TOKEN_URL=http://localhost:18080/auth/realms/camunda-platform/protocol/openid-connect/token
-export OIDC_CLIENT_ID=connectors
-export OIDC_CLIENT_SECRET=<from your stack .env>
-export OIDC_AUDIENCE=orchestration-api
-export AUTO_COMPLETE_SECONDS=0
-
-python3 -m uvicorn app:app --host 0.0.0.0 --port 8001
-```
-
-`curl -s localhost:8001/health | jq` must show `"oidc": true`.
-
-Secrets resolve on the **connector runtime**, not the broker. If your runtime sets a
-custom prefix in `application.yaml`, match it:
-
-```yaml
-camunda:
-  connector:
-    secretprovider:
-      environment:
-        prefix: "CONNECTORS_SECRET_"
-```
-
-```
-CONNECTORS_SECRET_snUser=snuser
-CONNECTORS_SECRET_snPwd=snpwd
-```
-
-Deploy `servicenow-integration-blueprint-stub.bpmn` and start `Process_snstub_v4`.
-
-### Two run modes
-
-**`AUTO_COMPLETE_SECONDS=6`** — the stub plays an agent closing each record after a
-delay. The instance runs start to finish in about 20 seconds, unattended.
-
-**`AUTO_COMPLETE_SECONDS=0`** — records are created and left open. The instance parks on
-each message catch event and stays Active indefinitely, like a real catalog task awaiting
-a human. Release it yourself:
-
-```bash
-curl -s localhost:8001/sim/records | jq '[.records[] | select(.state=="1") | {sys_id, table}]'
-curl -s -X POST localhost:8001/sim/complete/<sys_id>
-```
-
-Twice per instance — once for `change_request`, once for `sc_task`.
-
-![Instance parked on a ServiceNow-side wait](Images/CRP%202.png)
+**A correlation fix worth carrying forward.** The Spoke's *Correlate message* action maps
+to the correlate-message endpoint, which is explicitly **not buffered**. The blueprint
+puts `Start ServiceNow Flow` immediately before a catch on `fromSN`, so a fast callback
+can arrive before the token does and be dropped silently. This stub uses the **buffered
+publication** endpoint with a TTL instead. That is a fix, not a workaround — carry it
+into any real ServiceNow flow you build.
 
 ---
 
-## Observing the integration
-
-Four surfaces, each answering a different question:
-
-- **uvicorn log** — what Camunda asked ServiceNow to do. `<- camunda` lines show table,
-  sys_id and payload; `-> camunda` lines show the callback and its HTTP status.
-- **`/sim/records`** — the ServiceNow-side data. `state: "1"` open, `"3"` closed.
-- **Operate variables** — the correlation contract. `snFlow` and `snClosedAt` did not
-  originate in Camunda; they arrived on a message. `snQueryResult` records
-  `"server":"uvicorn"` in the response headers — the engine's own evidence that an
-  external HTTP service answered.
-- **`docker logs connectors`** — the wire, when a task incidents.
-
-Every green ① badge on a catch event corresponds to exactly one record at `state: "1"`.
-
-### Stepping through by hand
-
-Service tasks cannot hold a token — the connector runtime claims the job in milliseconds.
-To walk the process manually, stop the worker:
-
-```bash
-docker compose -p <project> -f docker-compose-full.yaml stop connectors
-```
-
-Now every service task parks. Use Operate's **Modify** tool to move the token and inject
-the variable each task would have produced:
-
-| Task | Variable |
-|---|---|
-| Create Request Item | `requestedItemResultSysId` |
-| Search Request Item | `state` |
-| Start ServiceNow Flow | `flowExecutionId` |
-| Create a Change Request | `crSysId` |
-| Create a Catalog Task | `catalogTaskSysId` |
-
-`Generate Custom ID` is a script task — the engine evaluates it and sets `camId` itself,
-connectors stopped or not.
-
-Set the variable in the **same batch** as the move onto a catch event: correlation keys
-are read when the token arrives.
-
-![Hand-stepping a token with injected variables](Images/CRP3.png)
-
-Moved elements record `state: TERMINATED`, not `COMPLETED` — a Move is *cancel at source,
-activate at target*, so the task never did its work. That is also why an interrupting
-boundary event terminates its activity rather than completing it.
-
----
-
-## Phase 2 — cutting over to a real instance
+## Cutting over to a real instance
 
 The transform introduced one indirection to make the switch a single field:
 
@@ -348,6 +233,6 @@ with a Scripted REST API at the same path — the connector never learns the dif
 
 ![End-to-end run on self-managed Camunda 8.8 with no ServiceNow instance](Images/SNCMNE2ESTUBTSTD.png)
 
-All five regions of the blueprint, three message correlations on three distinct keys, the
-error boundary firing on a real 407 — on a self-managed cluster with OIDC enforced, zero
-ServiceNow entitlement, and zero Enterprise Pack.
+All five regions of the blueprint, three message correlations on three distinct keys, and
+the error boundary firing on a real 407 — on a self-managed cluster with OIDC enforced,
+zero ServiceNow entitlement, and zero Enterprise Pack.
